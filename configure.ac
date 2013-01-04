@@ -91,6 +91,41 @@ if test x$enable_x11_compositor = xyes; then
   AC_DEFINE([BUILD_X11_COMPOSITOR], [1], [Build the X11 compositor])
 fi
 
+AC_ARG_ENABLE(x11shm-compositor, [  --enable-x11shm-compositor],,
+	      enable_x11shm_compositor=yes)
+AM_CONDITIONAL(ENABLE_X11SHM_COMPOSITOR, test x$enable_x11shm_compositor = xyes)
+if test x$enable_x11shm_compositor = xyes; then
+  PKG_CHECK_MODULES([XCB], xcb)
+  xcb_save_LIBS=$LIBS
+  xcb_save_CFLAGS=$CFLAGS
+  CFLAGS=$XCB_CFLAGS
+  LIBS=$XCB_LIBS
+  AC_CHECK_FUNCS([xcb_poll_for_queued_event])
+  LIBS=$xcb_save_LIBS
+  CFLAGS=$xcb_save_CFLAGS
+
+  X11SHM_COMPOSITOR_MODULES="x11 x11-xcb"
+
+  PKG_CHECK_MODULES(X11SHM_COMPOSITOR_XKB, [xcb-xkb],
+		    [have_xcb_xkb="yes"], [have_xcb_xkb="no"])
+  if test "x$have_xcb_xkb" = xyes; then
+	# Most versions of XCB have totally broken XKB bindings, where the
+	# events don't work.  Make sure we can actually use them.
+	xcb_xkb_save_CFLAGS=$CFLAGS
+	CFLAGS=$X11SHM_COMPOSITOR_XKB_CFLAGS
+	AC_CHECK_MEMBER([struct xcb_xkb_state_notify_event_t.xkbType],
+			[], [have_xcb_xkb=no], [[#include <xcb/xkb.h>]])
+	CFLAGS=$xcb_xkb_save_CFLAGS
+  fi
+  if test "x$have_xcb_xkb" = xyes; then
+	X11SHM_COMPOSITOR_MODULES="$X11SHM_COMPOSITOR_MODULES xcb-xkb"
+	AC_DEFINE([HAVE_XCB_XKB], [1], [libxcb supports XKB protocol])
+  fi
+
+  PKG_CHECK_MODULES(X11SHM_COMPOSITOR, [$X11SHM_COMPOSITOR_MODULES])
+  AC_DEFINE([BUILD_X11SHM_COMPOSITOR], [1], [Build the X11SHM compositor])
+fi
+
 
 AC_ARG_ENABLE(drm-compositor, [  --enable-drm-compositor],,
 	      enable_drm_compositor=yes)
