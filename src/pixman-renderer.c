@@ -72,16 +72,16 @@ pixman_renderer_read_pixels(struct weston_output *output,
 static void
 repaint_region(struct weston_surface *es, struct weston_output *output,
 		pixman_region32_t *region, pixman_region32_t *surf_region,
-		int blend)
+		pixman_op_t pixman_op)
 {
 	struct pixman_surface_state *ps = get_surface_state(es);
 	struct pixman_output_state *po = get_output_state(output);
 	pixman_region32_t final_region;
 	pixman_box32_t *rects;
-	pixman_op_t pixman_op = blend ? PIXMAN_OP_OVER : PIXMAN_OP_SRC;
 	int nrects, i, src_x, src_y;
 
-	weston_log("%s %p %p %p %p %d\n", __func__, es, output, region, surf_region, blend);
+	weston_log("%s %p %p %p %p %s\n", __func__, es, output, region, surf_region,
+		pixman_op == PIXMAN_OP_OVER ? "over" : "src");
 
 	/* The final region to be painted is the intersection of
 	 * 'region' and 'surf_region'. However, 'region' is in the global
@@ -94,9 +94,8 @@ repaint_region(struct weston_surface *es, struct weston_output *output,
 
 	/* That's what we need to paint */
 	pixman_region32_intersect(&final_region, &final_region, region);
-	//pixman_region32_copy(&final_region, region);
 
-	rects = pixman_region32_rectangles(region, &nrects);
+	rects = pixman_region32_rectangles(&final_region, &nrects);
 
 	for (i = 0; i < nrects; i++) {
 		weston_log("rect#%d: %d %d %d %d\n", i, rects[i].x1, rects[i].y1, rects[i].x2, rects[i].y2);
@@ -147,11 +146,11 @@ draw_surface(struct weston_surface *es, struct weston_output *output,
 	pixman_region32_subtract(&surface_blend, &surface_blend, &es->opaque);
 
 	if (pixman_region32_not_empty(&es->opaque)) {
-		repaint_region(es, output, &repaint, &es->opaque, 0);
+		repaint_region(es, output, &repaint, &es->opaque, PIXMAN_OP_SRC);
 	}
 
 	if (pixman_region32_not_empty(&surface_blend)) {
-		repaint_region(es, output, &repaint, &surface_blend, 1);
+		repaint_region(es, output, &repaint, &surface_blend, PIXMAN_OP_OVER);
 	}
 
 	pixman_region32_fini(&surface_blend);
