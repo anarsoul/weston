@@ -79,9 +79,12 @@ repaint_region(struct weston_surface *es, struct weston_output *output,
 	pixman_region32_t final_region;
 	pixman_box32_t *rects;
 	int nrects, i, src_x, src_y;
+	float surface_x, surface_y;
 
+#if 0
 	weston_log("%s %p %p %p %p %s\n", __func__, es, output, region, surf_region,
 		pixman_op == PIXMAN_OP_OVER ? "over" : "src");
+#endif
 
 	/* The final region to be painted is the intersection of
 	 * 'region' and 'surf_region'. However, 'region' is in the global
@@ -90,7 +93,12 @@ repaint_region(struct weston_surface *es, struct weston_output *output,
 	 */
 	pixman_region32_init(&final_region);
 	pixman_region32_copy(&final_region, surf_region);
-	pixman_region32_translate(&final_region, es->geometry.x, es->geometry.y);
+
+	if (es->transform.enabled) {
+		weston_surface_to_global_float(es, 0, 0, &surface_x, &surface_y);
+		pixman_region32_translate(&final_region, (int)surface_x, (int)surface_y);
+	} else
+		pixman_region32_translate(&final_region, es->geometry.x, es->geometry.y);
 
 	/* That's what we need to paint */
 	pixman_region32_intersect(&final_region, &final_region, region);
@@ -98,9 +106,13 @@ repaint_region(struct weston_surface *es, struct weston_output *output,
 	rects = pixman_region32_rectangles(&final_region, &nrects);
 
 	for (i = 0; i < nrects; i++) {
+#if 0
 		weston_log("rect#%d: %d %d %d %d\n", i, rects[i].x1, rects[i].y1, rects[i].x2, rects[i].y2);
+#endif
 		weston_surface_from_global(es, rects[i].x1, rects[i].y1, &src_x, &src_y);
+#if 0
 		weston_log("src_x: %d, src_y: %d\n", src_x, src_y);
+#endif
 		pixman_image_composite32(pixman_op,
 			ps->image, /* src */
 			NULL /* mask */,
