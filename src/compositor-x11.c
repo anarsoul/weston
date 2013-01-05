@@ -1312,7 +1312,10 @@ x11_destroy(struct weston_compositor *ec)
 
 	weston_compositor_shutdown(ec); /* destroys outputs, too */
 
-	gl_renderer_destroy(ec);
+	if (compositor->use_shm)
+		pixman_renderer_destroy(ec);
+	else
+		gl_renderer_destroy(ec);
 
 	XCloseDisplay(compositor->dpy);
 	free(ec);
