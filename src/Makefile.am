@@ -77,7 +77,6 @@ module_LTLIBRARIES =				\
 	$(desktop_shell)			\
 	$(tablet_shell)				\
 	$(x11_backend)				\
-	$(x11shm_backend)				\
 	$(drm_backend)				\
 	$(wayland_backend)			\
 	$(headless_backend)
@@ -104,20 +103,6 @@ x11_backend_la_CFLAGS =				\
 	$(X11_COMPOSITOR_CFLAGS)		\
 	$(GCC_CFLAGS)
 x11_backend_la_SOURCES = compositor-x11.c
-endif
-
-if ENABLE_X11SHM_COMPOSITOR
-x11shm_backend = x11shm-backend.la
-x11shm_backend_la_LDFLAGS = -module -avoid-version
-x11shm_backend_la_LIBADD = $(COMPOSITOR_LIBS) $(X11SHM_COMPOSITOR_LIBS) \
-	../shared/libshared-cairo.la
-x11shm_backend_la_CFLAGS =				\
-	$(COMPOSITOR_CFLAGS)			\
-	$(PIXMAN_CFLAGS)			\
-	$(CAIRO_CFLAGS)				\
-	$(X11SHM_COMPOSITOR_CFLAGS)		\
-	$(GCC_CFLAGS)
-x11shm_backend_la_SOURCES = compositor-x11shm.c
 endif
 
 if ENABLE_DRM_COMPOSITOR
