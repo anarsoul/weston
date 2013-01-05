@@ -38,6 +38,7 @@
 
 #include <xcb/xcb.h>
 #include <xcb/shm.h>
+#include <xcb/xcb_aux.h>
 #ifdef HAVE_XCB_XKB
 #include <xcb/xkb.h>
 #endif
@@ -112,12 +113,14 @@ struct x11_output {
 	struct weston_mode	mode;
 	struct wl_event_source *finish_frame_timer;
 
+	xcb_gc_t		gc;
 	xcb_shm_seg_t		segment;
 	pixman_image_t	       *hw_surface;
 	pixman_image_t         *shadow_surface;
 	int			shm_id;
 	void		       *buf;
 	void		       *shadow_buf;
+	uint8_t			depth;
 };
 
 static struct xkb_keymap *
@@ -343,7 +346,6 @@ x11_output_repaint_shm(struct weston_output *output_base,
 	int nrects, i, src_x, src_y, x1, y1, x2, y2, width, height;
 	xcb_void_cookie_t cookie;
 	xcb_generic_error_t *err;
-	xcb_gc_t gc;
 
 	pixman_renderer_output_set_buffer(output_base, output->shadow_surface);
 	ec->renderer->repaint_output(output_base, damage);
@@ -395,22 +397,19 @@ x11_output_repaint_shm(struct weston_output *output_base,
 
 	pixman_region32_subtract(&ec->primary_plane.damage,
 				 &ec->primary_plane.damage, damage);
-	gc = xcb_generate_id(c->conn);
-	xcb_create_gc(c->conn, gc, output->window, 0, NULL);
-	cookie = xcb_shm_put_image_checked(c->conn, output->window, gc,
+	cookie = xcb_shm_put_image_checked(c->conn, output->window, output->gc,
 					pixman_image_get_width(output->hw_surface),
 					pixman_image_get_height(output->hw_surface),
 					0, 0,
 					pixman_image_get_width(output->hw_surface),
 					pixman_image_get_height(output->hw_surface),
-					0, 0, 24, XCB_IMAGE_FORMAT_Z_PIXMAP,
+					0, 0, output->depth, XCB_IMAGE_FORMAT_Z_PIXMAP,
 					0, output->segment, 0);
 	err = xcb_request_check(c->conn, cookie);
 	if (err != NULL) {
 		weston_log("Failed to put shm image, err: %d\n", err->error_code);
 		free(err);
 	}
-	xcb_free_gc(c->conn, gc);
 
 	wl_event_source_timer_update(output->finish_frame_timer, 10);
 }
@@ -432,10 +431,23 @@ finish_frame_handler(void *data)
 static void
 x11_output_deinit_shm(struct x11_compositor *c, struct x11_output *output)
 {
+	xcb_void_cookie_t cookie;
+	xcb_generic_error_t *err;
+	xcb_free_gc(c->conn, output->gc);
+
 	pixman_image_unref(output->hw_surface);
 	output->hw_surface = NULL;
-	xcb_shm_detach(c->conn, output->segment);
+	cookie = xcb_shm_detach_checked(c->conn, output->segment);
+	err = xcb_request_check(c->conn, cookie);
+	if (err) {
+		weston_log("xcb_shm_detach failed, error %d\n", err->error_code);
+		free(err);
+	}
 	shmdt(output->buf);
+
+	pixman_image_unref(output->shadow_surface);
+	output->shadow_surface = NULL;
+	free(output->shadow_buf);
 }
 
 static void
@@ -563,17 +575,70 @@ x11_output_wait_for_map(struct x11_compositor *c, struct x11_output *output)
 	}
 }
 
+
+
 static int
 x11_output_init_shm(struct x11_compositor *c, struct x11_output *output,
 	int width, int height)
 {
+	xcb_screen_iterator_t iter;
+	xcb_visualtype_t *visual_type;
+	xcb_format_iterator_t fmt;
 	xcb_void_cookie_t cookie;
 	xcb_generic_error_t *err;
 	int shadow_width, shadow_height;
 	pixman_transform_t transform;
+	xcb_shm_query_version_reply_t *version;
+	int bitsperpixel = 0;
+	pixman_format_code_t pixman_format;
+
+	/* Check if SHM is available */
+	version = xcb_shm_query_version_reply(c->conn, xcb_shm_query_version(c->conn), 0);
+	if (!version)
+		/* SHM is missing */
+		return -ENOENT;
+	weston_log("Found SHM extension version: %d.%d\n", version->major_version, version->minor_version);
+	free(version);
+
+	iter = xcb_setup_roots_iterator(xcb_get_setup(c->conn));
+	visual_type = xcb_aux_find_visual_by_id(iter.data, iter.data->root_visual);
+	if (!visual_type) {
+		weston_log("Failed to lookup visual for root window\n");
+		return -ENOENT;
+	}
+	weston_log("Found visual, bits per value: %d, red_mask: %.8x, green_mask: %.8x, blue_mask: %.8x\n",
+		visual_type->bits_per_rgb_value,
+		visual_type->red_mask,
+		visual_type->green_mask,
+		visual_type->blue_mask);
+	output->depth = xcb_aux_get_depth_of_visual(iter.data, iter.data->root_visual);
+	weston_log("Visual depth is %d\n", output->depth);
+
+	for (fmt = xcb_setup_pixmap_formats_iterator(xcb_get_setup(c->conn));
+	     fmt.rem;
+	     xcb_format_next(&fmt)) {
+		if (fmt.data->depth == output->depth) {
+			bitsperpixel = fmt.data->bits_per_pixel;
+			break;
+		}
+	}
+	weston_log("Found format for depth %d, bpp: %d\n",
+		output->depth, bitsperpixel);
+
+	if  (bitsperpixel == 32 &&
+	     visual_type->red_mask == 0xff0000 &&
+	     visual_type->green_mask == 0x00ff00 &&
+	     visual_type->blue_mask == 0x0000ff) {
+		weston_log("Will use x8r8g8b8 format for SHM surfaces\n");
+		pixman_format = PIXMAN_x8r8g8b8;
+	} else {
+		weston_log("Can't find appropriate format for SHM pixmap\n");
+		return -ENOTSUP;
+	}
+
 
 	/* Create SHM segment and attach it */
-	output->shm_id = shmget(IPC_PRIVATE, width * height * sizeof(unsigned int), IPC_CREAT | S_IRWXU);
+	output->shm_id = shmget(IPC_PRIVATE, width * height * (bitsperpixel / 8), IPC_CREAT | S_IRWXU);
 	if (output->shm_id == -1) {
 		weston_log("x11shm: failed to allocate SHM segment\n");
 		return -ENOMEM;
@@ -595,8 +660,8 @@ x11_output_init_shm(struct x11_compositor *c, struct x11_output *output,
 	shmctl(output->shm_id, IPC_RMID, NULL);
 
 	/* Now create pixman image */
-	output->hw_surface = pixman_image_create_bits(PIXMAN_x8r8g8b8, width, height, output->buf,
-		width * sizeof(unsigned int));
+	output->hw_surface = pixman_image_create_bits(pixman_format, width, height, output->buf,
+		width * (bitsperpixel / 8));
 	pixman_transform_init_identity(&transform);
 	switch (output->base.transform) {
 	default:
@@ -638,12 +703,15 @@ x11_output_init_shm(struct x11_compositor *c, struct x11_output *output,
 			pixman_int_to_fixed(shadow_height));
 		break;
 	}
-	output->shadow_buf = malloc(width * height *  sizeof(unsigned int));
-	output->shadow_surface = pixman_image_create_bits(PIXMAN_a8r8g8b8, shadow_width, shadow_height,
-		output->shadow_buf, shadow_width * sizeof(unsigned int));
+	output->shadow_buf = malloc(width * height *  (bitsperpixel / 8));
+	output->shadow_surface = pixman_image_create_bits(pixman_format, shadow_width, shadow_height,
+		output->shadow_buf, shadow_width * (bitsperpixel / 8));
 	/* No need in transform for normal output */
 	if (output->base.transform != WL_OUTPUT_TRANSFORM_NORMAL)
 		pixman_image_set_transform(output->shadow_surface, &transform);
+
+	output->gc = xcb_generate_id(c->conn);
+	xcb_create_gc(c->conn, output->gc, output->window, 0, NULL);
 
 	return 0;
 }
