@@ -33,9 +33,11 @@
 #include <unistd.h>
 #include <errno.h>
 #include <sys/time.h>
+#include <sys/shm.h>
 #include <linux/input.h>
 
 #include <xcb/xcb.h>
+#include <xcb/shm.h>
 #ifdef HAVE_XCB_XKB
 #include <xcb/xkb.h>
 #endif
@@ -47,6 +49,7 @@
 
 #include "compositor.h"
 #include "gl-renderer.h"
+#include "pixman-renderer.h"
 #include "../shared/config-parser.h"
 #include "../shared/cairo-util.h"
 
@@ -79,6 +82,7 @@ struct x11_compositor {
 	struct xkb_keymap	*xkb_keymap;
 	unsigned int		 has_xkb;
 	uint8_t			 xkb_event_base;
+	int			 use_shm;
 
 	/* We could map multi-pointer X to multiple wayland seats, but
 	 * for now we only support core X input. */
@@ -107,6 +111,13 @@ struct x11_output {
 	xcb_window_t		window;
 	struct weston_mode	mode;
 	struct wl_event_source *finish_frame_timer;
+
+	xcb_shm_seg_t		segment;
+	pixman_image_t	       *hw_surface;
+	pixman_image_t         *shadow_surface;
+	int			shm_id;
+	void		       *buf;
+	void		       *shadow_buf;
 };
 
 static struct xkb_keymap *
@@ -307,8 +318,8 @@ x11_input_destroy(struct x11_compositor *compositor)
 }
 
 static void
-x11_output_repaint(struct weston_output *output_base,
-		   pixman_region32_t *damage)
+x11_output_repaint_gl(struct weston_output *output_base,
+		      pixman_region32_t *damage)
 {
 	struct x11_output *output = (struct x11_output *)output_base;
 	struct weston_compositor *ec = output->base.compositor;
@@ -317,6 +328,89 @@ x11_output_repaint(struct weston_output *output_base,
 
 	pixman_region32_subtract(&ec->primary_plane.damage,
 				 &ec->primary_plane.damage, damage);
+
+	wl_event_source_timer_update(output->finish_frame_timer, 10);
+}
+
+static void
+x11_output_repaint_shm(struct weston_output *output_base,
+		       pixman_region32_t *damage)
+{
+	struct x11_output *output = (struct x11_output *)output_base;
+	struct weston_compositor *ec = output->base.compositor;
+	struct x11_compositor *c = (struct x11_compositor *)ec;
+	pixman_box32_t *rects;
+	int nrects, i, src_x, src_y, x1, y1, x2, y2, width, height;
+	xcb_void_cookie_t cookie;
+	xcb_generic_error_t *err;
+	xcb_gc_t gc;
+
+	pixman_renderer_output_set_buffer(output_base, output->shadow_surface);
+	ec->renderer->repaint_output(output_base, damage);
+
+	width = pixman_image_get_width(output->shadow_surface);
+	height = pixman_image_get_height(output->shadow_surface);
+	rects = pixman_region32_rectangles(damage, &nrects);
+	for (i = 0; i < nrects; i++) {
+		switch (output_base->transform) {
+		default:
+		case WL_OUTPUT_TRANSFORM_NORMAL:
+			x1 = rects[i].x1;
+			x2 = rects[i].x2;
+			y1 = rects[i].y1;
+			y2 = rects[i].y2;
+			break;
+		case WL_OUTPUT_TRANSFORM_180:
+			x1 = width - rects[i].x2;
+			x2 = width - rects[i].x1;
+			y1 = height - rects[i].y2;
+			y2 = height - rects[i].y1;
+			break;
+		case WL_OUTPUT_TRANSFORM_90:
+			x1 = height - rects[i].y2;
+			x2 = height - rects[i].y1;
+			y1 = rects[i].x1;
+			y2 = rects[i].x2;
+			break;
+		case WL_OUTPUT_TRANSFORM_270:
+			x1 = rects[i].y1;
+			x2 = rects[i].y2;
+			y1 = width - rects[i].x2;
+			y2 = width - rects[i].x1;
+			break;
+		}
+		src_x = x1;
+		src_y = y1;
+
+		pixman_image_composite32(PIXMAN_OP_SRC,
+			output->shadow_surface, /* src */
+			NULL /* mask */,
+			output->hw_surface, /* dest */
+			src_x, src_y, /* src_x, src_y */
+			0, 0, /* mask_x, mask_y */
+			x1, y1, /* dest_x, dest_y */
+			x2 - x1, /* width */
+			y2 - y1 /* height */);
+	}
+
+	pixman_region32_subtract(&ec->primary_plane.damage,
+				 &ec->primary_plane.damage, damage);
+	gc = xcb_generate_id(c->conn);
+	xcb_create_gc(c->conn, gc, output->window, 0, NULL);
+	cookie = xcb_shm_put_image_checked(c->conn, output->window, gc,
+					pixman_image_get_width(output->hw_surface),
+					pixman_image_get_height(output->hw_surface),
+					0, 0,
+					pixman_image_get_width(output->hw_surface),
+					pixman_image_get_height(output->hw_surface),
+					0, 0, 24, XCB_IMAGE_FORMAT_Z_PIXMAP,
+					0, output->segment, 0);
+	err = xcb_request_check(c->conn, cookie);
+	if (err != NULL) {
+		weston_log("Failed to put shm image, err: %d\n", err->error_code);
+		free(err);
+	}
+	xcb_free_gc(c->conn, gc);
 
 	wl_event_source_timer_update(output->finish_frame_timer, 10);
 }
@@ -336,6 +430,15 @@ finish_frame_handler(void *data)
 }
 
 static void
+x11_output_deinit_shm(struct x11_compositor *c, struct x11_output *output)
+{
+	pixman_image_unref(output->hw_surface);
+	output->hw_surface = NULL;
+	xcb_shm_detach(c->conn, output->segment);
+	shmdt(output->buf);
+}
+
+static void
 x11_output_destroy(struct weston_output *output_base)
 {
 	struct x11_output *output = (struct x11_output *)output_base;
@@ -345,7 +448,11 @@ x11_output_destroy(struct weston_output *output_base)
 	wl_list_remove(&output->base.link);
 	wl_event_source_remove(output->finish_frame_timer);
 
-	gl_renderer_output_destroy(output_base);
+	if (compositor->use_shm) {
+		pixman_renderer_output_destroy(output_base);
+		x11_output_deinit_shm(compositor, output);
+	} else
+		gl_renderer_output_destroy(output_base);
 
 	xcb_destroy_window(compositor->conn, output->window);
 
@@ -456,6 +563,91 @@ x11_output_wait_for_map(struct x11_compositor *c, struct x11_output *output)
 	}
 }
 
+static int
+x11_output_init_shm(struct x11_compositor *c, struct x11_output *output,
+	int width, int height)
+{
+	xcb_void_cookie_t cookie;
+	xcb_generic_error_t *err;
+	int shadow_width, shadow_height;
+	pixman_transform_t transform;
+
+	/* Create SHM segment and attach it */
+	output->shm_id = shmget(IPC_PRIVATE, width * height * sizeof(unsigned int), IPC_CREAT | S_IRWXU);
+	if (output->shm_id == -1) {
+		weston_log("x11shm: failed to allocate SHM segment\n");
+		return -ENOMEM;
+	}
+	output->buf = shmat(output->shm_id, NULL, 0 /* read/write */);
+	if (-1 == (long)output->buf) {
+		weston_log("x11shm: failed to attach SHM segment\n");
+		return -ENOMEM;
+	}
+	output->segment = xcb_generate_id(c->conn);
+	cookie = xcb_shm_attach_checked(c->conn, output->segment, output->shm_id, 1);
+	err = xcb_request_check(c->conn, cookie);
+	if (err) {
+		weston_log("x11shm: xcb_shm_attach error %d\n", err->error_code);
+		free(err);
+		return err->error_code;
+	}
+
+	shmctl(output->shm_id, IPC_RMID, NULL);
+
+	/* Now create pixman image */
+	output->hw_surface = pixman_image_create_bits(PIXMAN_x8r8g8b8, width, height, output->buf,
+		width * sizeof(unsigned int));
+	pixman_transform_init_identity(&transform);
+	switch (output->base.transform) {
+	default:
+	case WL_OUTPUT_TRANSFORM_NORMAL:
+		shadow_width = width;
+		shadow_height = height;
+		pixman_transform_rotate(&transform,
+			NULL, 0, 0);
+		pixman_transform_translate(&transform, NULL,
+			0, 0);
+		break;
+	case WL_OUTPUT_TRANSFORM_180:
+		shadow_width = width;
+		shadow_height = height;
+		pixman_transform_rotate(&transform,
+			NULL, -pixman_fixed_1, 0);
+		pixman_transform_translate(NULL, &transform,
+			pixman_int_to_fixed(shadow_width),
+			pixman_int_to_fixed(shadow_height));
+		break;
+	case WL_OUTPUT_TRANSFORM_270:
+		shadow_width = height;
+		shadow_height = width;
+		pixman_transform_rotate(&transform,
+			NULL, 0, pixman_fixed_1);
+		pixman_transform_translate(&transform,
+			NULL,
+			pixman_int_to_fixed(shadow_width),
+			0);
+		break;
+	case WL_OUTPUT_TRANSFORM_90:
+		shadow_width = height;
+		shadow_height = width;
+		pixman_transform_rotate(&transform,
+			NULL, 0, -pixman_fixed_1);
+		pixman_transform_translate(&transform,
+			NULL,
+			0,
+			pixman_int_to_fixed(shadow_height));
+		break;
+	}
+	output->shadow_buf = malloc(width * height *  sizeof(unsigned int));
+	output->shadow_surface = pixman_image_create_bits(PIXMAN_a8r8g8b8, shadow_width, shadow_height,
+		output->shadow_buf, shadow_width * sizeof(unsigned int));
+	/* No need in transform for normal output */
+	if (output->base.transform != WL_OUTPUT_TRANSFORM_NORMAL)
+		pixman_image_set_transform(output->shadow_surface, &transform);
+
+	return 0;
+}
+
 static struct x11_output *
 x11_compositor_create_output(struct x11_compositor *c, int x, int y,
 			     int width, int height, int fullscreen,
@@ -562,7 +754,10 @@ x11_compositor_create_output(struct x11_compositor *c, int x, int y,
 	x11_output_wait_for_map(c, output);
 
 	output->base.origin = output->base.current;
-	output->base.repaint = x11_output_repaint;
+	if (c->use_shm)
+		output->base.repaint = x11_output_repaint_shm;
+	else
+		output->base.repaint = x11_output_repaint_gl;
 	output->base.destroy = x11_output_destroy;
 	output->base.assign_planes = NULL;
 	output->base.set_backlight = NULL;
@@ -574,8 +769,17 @@ x11_compositor_create_output(struct x11_compositor *c, int x, int y,
 	weston_output_init(&output->base, &c->base,
 			   x, y, width, height, transform);
 
-	if (gl_renderer_output_create(&output->base, output->window) < 0)
-		return NULL;
+	if (c->use_shm) {
+		if (x11_output_init_shm(c, output, width, height) < 0)
+			return NULL;
+		if (pixman_renderer_output_create(&output->base) < 0) {
+			x11_output_deinit_shm(c, output);
+			return NULL;
+		}
+	} else {
+		if (gl_renderer_output_create(&output->base, output->window) < 0)
+			return NULL;
+	}
 
 	loop = wl_display_get_event_loop(c->base.wl_display);
 	output->finish_frame_timer =
@@ -1118,6 +1322,7 @@ static struct weston_compositor *
 x11_compositor_create(struct wl_display *display,
 		      int fullscreen,
 		      int no_input,
+		      int use_shm,
 		      int argc, char *argv[], const char *config_file)
 {
 	struct x11_compositor *c;
@@ -1156,9 +1361,17 @@ x11_compositor_create(struct wl_display *display,
 	x11_compositor_get_resources(c);
 
 	c->base.wl_display = display;
-	if (gl_renderer_create(&c->base, c->dpy, gl_renderer_opaque_attribs,
-			NULL) < 0)
-		goto err_xdisplay;
+	c->use_shm = use_shm;
+	if (c->use_shm) {
+		if (pixman_renderer_init(&c->base) < 0)
+			goto err_xdisplay;
+	}
+	else {
+		if (gl_renderer_create(&c->base, c->dpy, gl_renderer_opaque_attribs,
+				NULL) < 0)
+			goto err_xdisplay;
+	}
+	weston_log("Using %s renderer\n", use_shm ? "pixman" : "gl");
 
 	c->base.destroy = x11_destroy;
 	c->base.restore = x11_restore;
@@ -1298,6 +1511,7 @@ backend_init(struct wl_display *display, int argc, char *argv[],
 {
 	int fullscreen = 0;
 	int no_input = 0;
+	int use_shm = 0;
 
 	const struct weston_option x11_options[] = {
 		{ WESTON_OPTION_INTEGER, "width", 0, &option_width },
@@ -1305,6 +1519,7 @@ backend_init(struct wl_display *display, int argc, char *argv[],
 		{ WESTON_OPTION_BOOLEAN, "fullscreen", 'f', &fullscreen },
 		{ WESTON_OPTION_INTEGER, "output-count", 0, &option_count },
 		{ WESTON_OPTION_BOOLEAN, "no-input", 0, &no_input },
+		{ WESTON_OPTION_BOOLEAN, "use-shm", 0, &use_shm },
 	};
 
 	parse_options(x11_options, ARRAY_LENGTH(x11_options), argc, argv);
@@ -1328,5 +1543,6 @@ backend_init(struct wl_display *display, int argc, char *argv[],
 	return x11_compositor_create(display,
 				     fullscreen,
 				     no_input,
+				     use_shm,
 				     argc, argv, config_file);
 }
