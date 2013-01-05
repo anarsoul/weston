@@ -109,9 +109,10 @@ struct x11_output {
 	xcb_window_t		window;
 	xcb_shm_seg_t		segment;
 	pixman_image_t	       *hw_surface;
+	pixman_image_t         *shadow_surface;
 	int			shm_id;
 	void		       *buf;
-	int			width, height;
+	void		       *shadow_buf;
 	struct weston_mode	mode;
 	struct wl_event_source *finish_frame_timer;
 };
@@ -320,20 +321,70 @@ x11_output_repaint(struct weston_output *output_base,
 	struct x11_output *output = (struct x11_output *)output_base;
 	struct weston_compositor *ec = output->base.compositor;
 	struct x11_compositor *c = (struct x11_compositor *)ec;
+	pixman_box32_t *rects;
+	int nrects, i, src_x, src_y, x1, y1, x2, y2, width, height;
 	xcb_void_cookie_t cookie;
 	xcb_generic_error_t *err;
 	xcb_gc_t gc;
 
-	pixman_renderer_output_set_buffer(output_base, output->hw_surface);
+	pixman_renderer_output_set_buffer(output_base, output->shadow_surface);
 	ec->renderer->repaint_output(output_base, damage);
+
+	width = pixman_image_get_width(output->shadow_surface);
+	height = pixman_image_get_height(output->shadow_surface);
+	rects = pixman_region32_rectangles(damage, &nrects);
+	for (i = 0; i < nrects; i++) {
+		switch (output_base->transform) {
+		default:
+		case WL_OUTPUT_TRANSFORM_NORMAL:
+			x1 = rects[i].x1;
+			x2 = rects[i].x2;
+			y1 = rects[i].y1;
+			y2 = rects[i].y2;
+			break;
+		case WL_OUTPUT_TRANSFORM_180:
+			x1 = width - rects[i].x2;
+			x2 = width - rects[i].x1;
+			y1 = height - rects[i].y2;
+			y2 = height - rects[i].y1;
+			break;
+		case WL_OUTPUT_TRANSFORM_90:
+			x1 = height - rects[i].y2;
+			x2 = height - rects[i].y1;
+			y1 = rects[i].x1;
+			y2 = rects[i].x2;
+			break;
+		case WL_OUTPUT_TRANSFORM_270:
+			x1 = rects[i].y1;
+			x2 = rects[i].y2;
+			y1 = width - rects[i].x2;
+			y2 = width - rects[i].x1;
+			break;
+		}
+		src_x = x1;
+		src_y = y1;
+
+		pixman_image_composite32(PIXMAN_OP_SRC,
+			output->shadow_surface, /* src */
+			NULL /* mask */,
+			output->hw_surface, /* dest */
+			src_x, src_y, /* src_x, src_y */
+			0, 0, /* mask_x, mask_y */
+			x1, y1, /* dest_x, dest_y */
+			x2 - x1, /* width */
+			y2 - y1 /* height */);
+	}
 
 	pixman_region32_subtract(&ec->primary_plane.damage,
 				 &ec->primary_plane.damage, damage);
 	gc = xcb_generate_id(c->conn);
 	xcb_create_gc(c->conn, gc, output->window, 0, NULL);
 	cookie = xcb_shm_put_image_checked(c->conn, output->window, gc,
-					output->width, output->height,
-					0, 0, output->width, output->height,
+					pixman_image_get_width(output->hw_surface),
+					pixman_image_get_height(output->hw_surface),
+					0, 0,
+					pixman_image_get_width(output->hw_surface),
+					pixman_image_get_height(output->hw_surface),
 					0, 0, 24, XCB_IMAGE_FORMAT_Z_PIXMAP,
 					0, output->segment, 0);
 	err = xcb_request_check(c->conn, cookie);
@@ -497,6 +548,8 @@ x11_output_init_shm(struct x11_compositor *c, struct x11_output *output,
 {
 	xcb_void_cookie_t cookie;
 	xcb_generic_error_t *err;
+	int shadow_width, shadow_height;
+	pixman_transform_t transform;
 
 	/* Create SHM segment and attach it */
 	output->shm_id = shmget(IPC_PRIVATE, width * height * sizeof(unsigned int), IPC_CREAT | S_IRWXU);
@@ -521,8 +574,55 @@ x11_output_init_shm(struct x11_compositor *c, struct x11_output *output,
 	shmctl(output->shm_id, IPC_RMID, NULL);
 
 	/* Now create pixman image */
-	output->hw_surface = pixman_image_create_bits(PIXMAN_a8r8g8b8, width, height, output->buf,
+	output->hw_surface = pixman_image_create_bits(PIXMAN_x8r8g8b8, width, height, output->buf,
 		width * sizeof(unsigned int));
+	pixman_transform_init_identity(&transform);
+	switch (output->base.transform) {
+	default:
+	case WL_OUTPUT_TRANSFORM_NORMAL:
+		shadow_width = width;
+		shadow_height = height;
+		pixman_transform_rotate(&transform,
+			NULL, 0, 0);
+		pixman_transform_translate(&transform, NULL,
+			0, 0);
+		break;
+	case WL_OUTPUT_TRANSFORM_180:
+		shadow_width = width;
+		shadow_height = height;
+		pixman_transform_rotate(&transform,
+			NULL, -pixman_fixed_1, 0);
+		pixman_transform_translate(NULL, &transform,
+			pixman_int_to_fixed(shadow_width),
+			pixman_int_to_fixed(shadow_height));
+		break;
+	case WL_OUTPUT_TRANSFORM_270:
+		shadow_width = height;
+		shadow_height = width;
+		pixman_transform_rotate(&transform,
+			NULL, 0, pixman_fixed_1);
+		pixman_transform_translate(&transform,
+			NULL,
+			pixman_int_to_fixed(shadow_width),
+			0);
+		break;
+	case WL_OUTPUT_TRANSFORM_90:
+		shadow_width = height;
+		shadow_height = width;
+		pixman_transform_rotate(&transform,
+			NULL, 0, -pixman_fixed_1);
+		pixman_transform_translate(&transform,
+			NULL,
+			0,
+			pixman_int_to_fixed(shadow_height));
+		break;
+	}
+	output->shadow_buf = malloc(width * height *  sizeof(unsigned int));
+	output->shadow_surface = pixman_image_create_bits(PIXMAN_a8r8g8b8, shadow_width, shadow_height,
+		output->shadow_buf, shadow_width * sizeof(unsigned int));
+	/* No need in transform for normal output */
+	if (output->base.transform != WL_OUTPUT_TRANSFORM_NORMAL)
+		pixman_image_set_transform(output->shadow_surface, &transform);
 
 	weston_log("initialized SHM!\n");
 
@@ -644,9 +744,6 @@ x11_compositor_create_output(struct x11_compositor *c, int x, int y,
 	output->base.current = &output->mode;
 	output->base.make = "xwayland";
 	output->base.model = "none";
-	/* FIXME */
-	output->width = width;
-	output->height = height;
 	weston_output_init(&output->base, &c->base,
 			   x, y, width, height, transform);
 
