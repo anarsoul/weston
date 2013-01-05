@@ -123,6 +123,7 @@ repaint_region(struct weston_surface *es, struct weston_output *output,
 			rects[i].x2 - rects[i].x1, /* width */
 			rects[i].y2 - rects[i].y1 /* height */);
 	}
+	pixman_region32_fini(&final_region);
 }
 
 static void
