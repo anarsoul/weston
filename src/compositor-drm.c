@@ -450,7 +450,7 @@ drm_output_prepare_scanout_surface(struct weston_output *_output,
 	    buffer->width != output->base.current->width ||
 	    buffer->height != output->base.current->height ||
 	    output->base.transform != es->buffer_transform ||
-	    es->transform.enabled)
+	    es->transform.type != TRANSFORM_NONE)
 		return NULL;
 
 	bo = gbm_bo_import(c->gbm, GBM_BO_IMPORT_WL_BUFFER,
@@ -701,7 +701,7 @@ drm_surface_transform_supported(struct weston_surface *es)
 	struct weston_matrix *matrix = &es->transform.matrix;
 	int i;
 
-	if (!es->transform.enabled)
+	if (es->transform.type == TRANSFORM_NONE)
 		return 1;
 
 	for (i = 0; i < 16; i++) {

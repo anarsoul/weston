@@ -320,7 +320,7 @@ WL_EXPORT void
 weston_surface_to_global_float(struct weston_surface *surface,
 			       float sx, float sy, float *x, float *y)
 {
-	if (surface->transform.enabled) {
+	if (surface->transform.type != TRANSFORM_NONE) {
 		struct weston_vector v = { { sx, sy, 0.0f, 1.0f } };
 
 		weston_matrix_transform(&surface->transform.matrix, &v);
@@ -508,7 +508,7 @@ surface_compute_bbox(struct weston_surface *surface, int32_t sx, int32_t sy,
 static void
 weston_surface_update_transform_disable(struct weston_surface *surface)
 {
-	surface->transform.enabled = 0;
+	surface->transform.type = TRANSFORM_NONE;
 
 	/* round off fractions when not transformed */
 	surface->geometry.x = roundf(surface->geometry.x);
@@ -536,7 +536,7 @@ weston_surface_update_transform_enable(struct weston_surface *surface)
 	struct weston_matrix *inverse = &surface->transform.inverse;
 	struct weston_transform *tform;
 
-	surface->transform.enabled = 1;
+	surface->transform.type = TRANSFORM_OTHER;
 
 	/* Otherwise identity matrix, but with x and y translation. */
 	surface->transform.position.matrix.d[12] = surface->geometry.x;
@@ -552,6 +552,9 @@ weston_surface_update_transform_enable(struct weston_surface *surface)
 			" transformation not invertible.\n", surface);
 		return -1;
 	}
+
+	if (weston_matrix_is_translate(matrix))
+		surface->transform.type = TRANSFORM_TRANSLATE;
 
 	surface_compute_bbox(surface, 0, 0, surface->geometry.width,
 			     surface->geometry.height,
@@ -609,7 +612,7 @@ WL_EXPORT void
 weston_surface_from_global_float(struct weston_surface *surface,
 				 float x, float y, float *sx, float *sy)
 {
-	if (surface->transform.enabled) {
+	if (surface->transform.type != TRANSFORM_NONE) {
 		struct weston_vector v = { { x, y, 0.0f, 1.0f } };
 
 		weston_matrix_transform(&surface->transform.inverse, &v);
@@ -1012,7 +1015,7 @@ surface_accumulate_damage(struct weston_surface *surface,
 	    wl_buffer_is_shm(surface->buffer_ref.buffer))
 		surface->compositor->renderer->flush_damage(surface);
 
-	if (surface->transform.enabled) {
+	if (surface->transform.type != TRANSFORM_NONE) {
 		pixman_box32_t *extents;
 
 		extents = pixman_region32_extents(&surface->damage);

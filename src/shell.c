@@ -1870,7 +1870,7 @@ shell_map_popup(struct shell_surface *shsurf)
 	shsurf->popup.grab.interface = &popup_grab_interface;
 
 	weston_surface_update_transform(parent);
-	if (parent->transform.enabled) {
+	if (parent->transform.type != TRANSFORM_NONE) {
 		shsurf->popup.parent_transform.matrix =
 			parent->transform.matrix;
 	} else {

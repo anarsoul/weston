@@ -126,7 +126,7 @@ repaint_region(struct weston_surface *es, struct weston_output *output,
 	pixman_region32_init(&final_region);
 	pixman_region32_copy(&final_region, surf_region);
 
-	if (es->transform.enabled) {
+	if (es->transform.type != TRANSFORM_NONE) {
 		weston_surface_to_global_float(es, 0, 0, &surface_x, &surface_y);
 		pixman_region32_translate(&final_region, (int)surface_x, (int)surface_y);
 	} else

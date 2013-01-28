@@ -480,7 +480,7 @@ calculate_edges(struct weston_surface *es, pixman_box32_t *rect,
 	 * there will be only four edges.  We just need to clip the surface
 	 * vertices to the clip rect bounds:
 	 */
-	if (!es->transform.enabled) {
+	if (es->transform.type == TRANSFORM_NONE) {
 		for (i = 0; i < surf.n; i++) {
 			ex[i] = clip(surf.x[i], ctx.clip.x1, ctx.clip.x2);
 			ey[i] = clip(surf.y[i], ctx.clip.y1, ctx.clip.y2);
@@ -772,7 +772,7 @@ draw_surface(struct weston_surface *es, struct weston_output *output,
 	use_shader(gr, gs->shader);
 	shader_uniforms(gs->shader, es, output);
 
-	if (es->transform.enabled || output->zoom.active)
+	if (es->transform.type != TRANSFORM_NONE || output->zoom.active)
 		filter = GL_LINEAR;
 	else
 		filter = GL_NEAREST;

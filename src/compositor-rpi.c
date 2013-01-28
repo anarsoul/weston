@@ -736,7 +736,7 @@ rpi_assign_plane(struct weston_surface *surface, struct rpi_output *output)
 	struct rpi_element *element;
 
 	/* dispmanx elements cannot transform */
-	if (surface->transform.enabled) {
+	if (surface->transform.type != TRANSFORM_NONE) {
 		/* XXX: inspect the transformation matrix, we might still
 		 * be able to put it into an element; scaling, additional
 		 * translation (window titlebar context menus?)

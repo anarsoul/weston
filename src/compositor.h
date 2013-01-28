@@ -61,6 +61,12 @@ enum weston_led {
 	LED_SCROLL_LOCK = (1 << 2),
 };
 
+enum weston_transform_type {
+	TRANSFORM_NONE,
+	TRANSFORM_TRANSLATE,
+	TRANSFORM_OTHER,
+};
+
 struct weston_mode {
 	uint32_t flags;
 	int32_t width, height;
@@ -419,7 +425,7 @@ struct weston_surface {
 		/* matrix and inverse are used only if enabled = 1.
 		 * If enabled = 0, use x, y, width, height directly.
 		 */
-		int enabled;
+		enum weston_transform_type type;
 		struct weston_matrix matrix;
 		struct weston_matrix inverse;
 
