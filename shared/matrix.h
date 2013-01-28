@@ -61,4 +61,7 @@ inverse_transform(const double *LU, const unsigned *p, float *v);
 #  define MATRIX_TEST_EXPORT static
 #endif
 
+int
+weston_matrix_is_translate(const struct weston_matrix *matrix);
+
 #endif /* WESTON_MATRIX_H */

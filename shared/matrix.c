@@ -21,6 +21,7 @@
  * CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+#include <float.h>
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
@@ -251,4 +252,21 @@ weston_matrix_invert(struct weston_matrix *inverse,
 		inverse_transform(LU, perm, &inverse->d[c * 4]);
 
 	return 0;
+}
+
+int
+weston_matrix_is_translate(const struct weston_matrix *matrix)
+{
+	struct weston_matrix translate = {
+		{ 1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0,
+		  matrix->d[12], matrix->d[13], matrix->d[14], 1 }
+	};
+	int i;
+
+	for (i = 0; i < 16; i++) {
+		if (fabsf(matrix->d[i] - translate.d[i]) > FLT_EPSILON)
+			return 0;
+	}
+
+	return 1;
 }
